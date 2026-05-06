@@ -111,6 +111,11 @@ def _parse_guardrail_400(raw: bytes) -> str:
     return build_blocked_assistant_text(failed)
 
 
+def _looks_like_sse_payload(raw: bytes) -> bool:
+    sample = raw.lstrip()[:32].lower()
+    return sample.startswith(b"data:") or sample.startswith(b"event:") or sample.startswith(b"id:")
+
+
 async def _proxy_chat_completions(request: Request) -> Response:
     settings = get_settings()
     if not settings.upstream_base_url:
@@ -204,9 +209,11 @@ async def _proxy_chat_completions(request: Request) -> Response:
         )
 
     if sc == 200:
-        media = pct.split(";")[0].strip() if pct else "application/json"
-        line = raw.strip()
-        payload_sse = b"data: " + line + b"\n\n" + b"data: [DONE]\n\n"
+        if _looks_like_sse_payload(raw):
+            payload_sse = raw
+        else:
+            line = raw.strip()
+            payload_sse = b"data: " + line + b"\n\n" + b"data: [DONE]\n\n"
         return StreamingResponse(
             _single_chunk(payload_sse),
             status_code=200,
