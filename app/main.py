@@ -263,6 +263,56 @@ async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
 
+def _verify_dify_token(request: Request, expected_token: str) -> Optional[Response]:
+    if not expected_token:
+        return JSONResponse({"error": {"message": "Server misconfiguration: DIFY_MODERATION_TOKEN is required"}}, status_code=500)
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse({"error": {"message": "Missing bearer token"}}, status_code=401)
+    token = auth[len("Bearer ") :].strip()
+    if token != expected_token:
+        return JSONResponse({"error": {"message": "Invalid bearer token"}}, status_code=401)
+    return None
+
+
+async def _scan_text_with_f5(text: str) -> tuple[Optional[bool], Optional[str]]:
+    settings = get_settings()
+    if not settings.f5_scans_url:
+        return None, "F5_SCANS_URL 未配置"
+    if not settings.f5_scans_api_key:
+        return None, "F5_SCANS_API_KEY 未配置"
+    assert _client is not None
+    try:
+        resp = await _client.post(
+            settings.f5_scans_url,
+            headers={
+                "Authorization": f"Bearer {settings.f5_scans_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"input": text},
+        )
+    except Exception as e:
+        return None, f"调用 scans 接口失败：{e}"
+
+    if resp.status_code != 200:
+        try:
+            err_text = (await resp.aread()).decode("utf-8", errors="ignore")
+        except Exception:
+            err_text = ""
+        return None, f"scans 接口返回非 200：{resp.status_code} {err_text[:200]}"
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        return None, f"scans 响应 JSON 解析失败：{e}"
+
+    result = data.get("result") if isinstance(data, dict) else None
+    outcome = result.get("outcome") if isinstance(result, dict) else None
+    if not isinstance(outcome, str):
+        return None, "scans 响应缺少 result.outcome"
+    return outcome.lower() == "flagged", None
+
+
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_completions(request: Request) -> Response:
@@ -287,3 +337,85 @@ async def chat_completions_last_user_only(request: Request) -> Response:
 
     assert rewritten_body is not None
     return await _proxy_chat_completions(request, body_override=rewritten_body)
+
+
+@app.post("/dify/moderation")
+@app.post("/moderation")
+async def dify_moderation(request: Request) -> Response:
+    settings = get_settings()
+    auth_error = _verify_dify_token(request, settings.dify_moderation_token)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        payload = await request.json()
+    except Exception as e:
+        return JSONResponse(
+            {"error": {"message": f"请求体不是合法 JSON：{e}", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            {"error": {"message": "请求体必须是 JSON 对象", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+
+    point = payload.get("point")
+    params = payload.get("params")
+    if point == "ping":
+        return JSONResponse({"result": "pong"}, status_code=200)
+    if not isinstance(params, dict):
+        return JSONResponse(
+            {"error": {"message": "缺少 params 对象", "type": "invalid_request_error"}},
+            status_code=400,
+        )
+
+    if point == "app.moderation.input":
+        content = params.get("query")
+    elif point == "app.moderation.output":
+        content = params.get("text")
+    else:
+        return JSONResponse(
+            {
+                "error": {
+                    "message": "不支持的 point，仅支持 app.moderation.input/app.moderation.output/ping",
+                    "type": "invalid_request_error",
+                }
+            },
+            status_code=400,
+        )
+
+    if content is None:
+        content = ""
+    if not isinstance(content, str):
+        content = str(content)
+
+    # 空文本按未命中处理，避免对 scans 做无意义调用。
+    if not content.strip():
+        return JSONResponse({"flagged": False}, status_code=200)
+
+    flagged, err = await _scan_text_with_f5(content)
+    if err is not None:
+        # 审查服务异常时，保守处理为拦截，防止漏检。
+        return JSONResponse(
+            {
+                "flagged": True,
+                "action": "direct_output",
+                "preset_response": settings.moderation_block_message,
+                "error": err,
+            },
+            status_code=200,
+        )
+
+    if flagged:
+        return JSONResponse(
+            {
+                "flagged": True,
+                "action": "direct_output",
+                "preset_response": settings.moderation_block_message,
+            },
+            status_code=200,
+        )
+
+    return JSONResponse({"flagged": False}, status_code=200)

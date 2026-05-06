@@ -11,6 +11,7 @@
 - **阻断**：上游 HTTP 400 且为 Guardrail 阻断 JSON 时，解析 `error.cai_error.scanner_results` 中 `outcome == "failed"` 的项，拼装中文说明文案，并以 OpenAI `chat.completion` / `chat.completion.chunk`（流式）返回，**HTTP 状态码为 200**，`finish_reason` 为 **`stop`**。
 - **解析失败**：仍返回 **HTTP 200**，内容为 OpenAI 形态的助手文本，其中说明无法解析的原因（见环境变量说明中的文案约定）。
 - **占位**：`GET /v1/models` 与 `GET /models` 返回最小模型列表；`GET /health` 健康检查。
+- **Dify 审查接口**：`POST /dify/moderation`（另支持 `POST /moderation`），支持 `app.moderation.input` 与 `app.moderation.output` 两种扩展点；将指定字段发送到 F5 `scans` 接口并据 `result.outcome` 判定是否违规。
 
 ## 环境变量
 
@@ -27,6 +28,10 @@
 | `MAX_KEEPALIVE_CONNECTIONS` | httpx 最大保持连接数 | `50` |
 | `MODELS_LIST_ID` | `/v1/models` 中返回的模型 id | `placeholder-model` |
 | `MODELS_LIST_OWNED_BY` | `/v1/models` 中 `owned_by` | `proxy` |
+| `F5_SCANS_URL` | F5 scans 完整 URL（例如 `https://calypsoai.app/backend/v1/scans`） | 空 |
+| `F5_SCANS_API_KEY` | F5 scans 的 Bearer Token | 空 |
+| `DIFY_MODERATION_TOKEN` | Dify 调用审查接口时的 Bearer Token（必填） | 空（未配置将导致 moderation 接口返回 500） |
+| `MODERATION_BLOCK_MESSAGE` | 命中或故障时 direct_output 预设回答 | `请求或响应经F5 Guardrail检查存在违规。` |
 
 ## 安装与运行
 
@@ -87,6 +92,37 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 - 请求体必须是 JSON 对象，且包含 `messages` 数组。
 - `messages` 中必须至少有一条 `role=user` 消息。
 - 不满足上述条件时，返回 HTTP 400（`invalid_request_error`）。
+
+### Dify moderation 接口
+
+- 接口：`POST /dify/moderation`（或 `/moderation`）
+- 鉴权：必须携带 `Authorization: Bearer $DIFY_MODERATION_TOKEN`；若服务端未配置 `DIFY_MODERATION_TOKEN`，接口返回 500。
+- 支持扩展点：
+  - `app.moderation.input`：读取 `params.query` 送审
+  - `app.moderation.output`：读取 `params.text` 送审
+- 送审请求：`POST $F5_SCANS_URL`，`Authorization: Bearer $F5_SCANS_API_KEY`，JSON 体为 `{"input":"<待审文本>"}`。
+- 判定规则：当 scans 返回 JSON 中 `result.outcome == "flagged"` 时视为违规。
+
+命中违规时统一返回：
+
+```json
+{
+  "flagged": true,
+  "action": "direct_output",
+  "preset_response": "请求或响应经F5 Guardrail检查存在违规。"
+}
+```
+
+未命中时返回：
+
+```json
+{
+  "flagged": false
+}
+```
+
+说明：
+- 为避免漏检，若 scans 接口异常（超时、非 200、返回格式错误、缺少 `result.outcome`），当前实现采用**保守拦截**策略：同样返回 `flagged=true` + `direct_output`，并在响应里附带 `error` 字段便于排障。
 
 ### 流式成功路径说明
 

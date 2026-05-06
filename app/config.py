@@ -36,6 +36,10 @@ class Settings:
     max_keepalive_connections: int
     models_list_id: str
     models_list_owned_by: str
+    f5_scans_url: str
+    f5_scans_api_key: str
+    dify_moderation_token: str
+    moderation_block_message: str
 
 
 @lru_cache
@@ -52,4 +56,11 @@ def get_settings() -> Settings:
         max_keepalive_connections=_env_int("MAX_KEEPALIVE_CONNECTIONS", 50),
         models_list_id=os.environ.get("MODELS_LIST_ID", "placeholder-model"),
         models_list_owned_by=os.environ.get("MODELS_LIST_OWNED_BY", "proxy"),
+        f5_scans_url=os.environ.get("F5_SCANS_URL", "").strip(),
+        f5_scans_api_key=os.environ.get("F5_SCANS_API_KEY", "").strip(),
+        dify_moderation_token=os.environ.get("DIFY_MODERATION_TOKEN", "").strip(),
+        moderation_block_message=os.environ.get(
+            "MODERATION_BLOCK_MESSAGE",
+            "请求或响应经F5 Guardrail检查存在违规。",
+        ),
     )
