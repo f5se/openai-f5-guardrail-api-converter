@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
@@ -17,8 +18,10 @@ from app.guardrail import (
     parse_error_fallback_text,
     sse_chunks_for_blocked,
 )
+from app.logging_utils import mask_auth, maybe_parse_json_bytes, pretty_payload, setup_logger
 
 _client: Optional[httpx.AsyncClient] = None
+_logger = setup_logger()
 
 
 def _build_http_client() -> httpx.AsyncClient:
@@ -149,6 +152,7 @@ def _build_last_user_only_body(original_body: bytes) -> tuple[Optional[bytes], O
 
 async def _proxy_chat_completions(request: Request, body_override: Optional[bytes] = None) -> Response:
     settings = get_settings()
+    trace_id = str(uuid.uuid4())[:8]
     if not settings.upstream_base_url:
         return JSONResponse(
             {
@@ -163,10 +167,28 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
     body = body_override if body_override is not None else await request.body()
     stream_requested, model_name = parse_client_body(body)
     headers = _upstream_headers(request)
+    if settings.log_debug:
+        _logger.debug(
+            "[%s] CLIENT -> PROXY chat_completions request\npath=%s stream=%s model=%s\nheaders=%s\nbody=%s",
+            trace_id,
+            request.url.path,
+            stream_requested,
+            model_name or "<empty>",
+            pretty_payload(mask_auth(headers)),
+            pretty_payload(maybe_parse_json_bytes(body) or body),
+        )
 
     assert _client is not None
 
     if not stream_requested:
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] PROXY -> GUARDRAIL request\nurl=%s\nheaders=%s\nbody=%s",
+                trace_id,
+                settings.upstream_base_url,
+                pretty_payload(mask_auth(headers)),
+                pretty_payload(maybe_parse_json_bytes(body) or body),
+            )
         upstream = await _client.post(
             settings.upstream_base_url,
             headers=headers,
@@ -178,17 +200,64 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
 
         if status_code == 200:
             content = await upstream.aread()
+            if settings.log_debug:
+                _logger.debug(
+                    "[%s] GUARDRAIL -> PROXY response\nstatus=%s content_type=%s\nbody=%s",
+                    trace_id,
+                    status_code,
+                    ct,
+                    pretty_payload(maybe_parse_json_bytes(content) or content),
+                )
+                _logger.debug(
+                    "[%s] PROXY -> CLIENT response\nstatus=200 content_type=%s\nmode=non_stream_passthrough",
+                    trace_id,
+                    media,
+                )
             return Response(content=content, status_code=200, media_type=media)
 
         raw = await upstream.aread()
         if status_code == 400:
             content_text = _parse_guardrail_400(raw)
+            if settings.log_debug:
+                _logger.debug(
+                    "[%s] GUARDRAIL -> PROXY blocked response\nstatus=400 content_type=%s\nbody=%s",
+                    trace_id,
+                    ct,
+                    pretty_payload(maybe_parse_json_bytes(raw) or raw),
+                )
+                _logger.debug(
+                    "[%s] PROXY -> CLIENT converted response\nstatus=200 mode=non_stream_converted\nbody=%s",
+                    trace_id,
+                    pretty_payload(chat_completion_json(content=content_text, model=model_name)),
+                )
             return JSONResponse(
                 chat_completion_json(content=content_text, model=model_name),
                 status_code=200,
             )
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] GUARDRAIL -> PROXY response\nstatus=%s content_type=%s\nbody=%s",
+                trace_id,
+                status_code,
+                ct,
+                pretty_payload(maybe_parse_json_bytes(raw) or raw),
+            )
+            _logger.debug(
+                "[%s] PROXY -> CLIENT passthrough response\nstatus=%s content_type=%s",
+                trace_id,
+                status_code,
+                media,
+            )
         return Response(content=raw, status_code=status_code, media_type=media)
 
+    if settings.log_debug:
+        _logger.debug(
+            "[%s] PROXY -> GUARDRAIL request(stream probe)\nurl=%s\nheaders=%s\nbody=%s",
+            trace_id,
+            settings.upstream_base_url,
+            pretty_payload(mask_auth(headers)),
+            pretty_payload(maybe_parse_json_bytes(body) or body),
+        )
     async with _client.stream(
         "POST",
         settings.upstream_base_url,
@@ -199,6 +268,16 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
         pct = probe.headers.get("content-type", "")
 
         if sc == 200 and "text/event-stream" in pct.lower():
+            if settings.log_debug:
+                _logger.debug(
+                    "[%s] GUARDRAIL -> PROXY stream accepted\nstatus=200 content_type=%s",
+                    trace_id,
+                    pct,
+                )
+                _logger.debug(
+                    "[%s] PROXY -> CLIENT response\nstatus=200 content_type=text/event-stream mode=stream_passthrough",
+                    trace_id,
+                )
 
             async def passthrough_sse() -> AsyncIterator[bytes]:
                 async with _client.stream(
@@ -224,6 +303,17 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
 
     if sc == 400:
         content_text = _parse_guardrail_400(raw)
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] GUARDRAIL -> PROXY blocked response(stream path)\nstatus=400 content_type=%s\nbody=%s",
+                trace_id,
+                pct,
+                pretty_payload(maybe_parse_json_bytes(raw) or raw),
+            )
+            _logger.debug(
+                "[%s] PROXY -> CLIENT converted stream response\nstatus=200 content_type=text/event-stream",
+                trace_id,
+            )
 
         async def blocked_sse() -> AsyncIterator[bytes]:
             for frame in sse_chunks_for_blocked(content=content_text, model=model_name):
@@ -245,6 +335,17 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
         else:
             line = raw.strip()
             payload_sse = b"data: " + line + b"\n\n" + b"data: [DONE]\n\n"
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] GUARDRAIL -> PROXY non-standard stream probe response\nstatus=200 content_type=%s\nbody=%s",
+                trace_id,
+                pct,
+                pretty_payload(raw),
+            )
+            _logger.debug(
+                "[%s] PROXY -> CLIENT normalized SSE response\nstatus=200 content_type=text/event-stream",
+                trace_id,
+            )
         return StreamingResponse(
             _single_chunk(payload_sse),
             status_code=200,
@@ -256,6 +357,20 @@ async def _proxy_chat_completions(request: Request, body_override: Optional[byte
         )
 
     media_err = pct.split(";")[0].strip() if pct else "application/json"
+    if settings.log_debug:
+        _logger.debug(
+            "[%s] GUARDRAIL -> PROXY error(stream path)\nstatus=%s content_type=%s\nbody=%s",
+            trace_id,
+            sc,
+            pct,
+            pretty_payload(maybe_parse_json_bytes(raw) or raw),
+        )
+        _logger.debug(
+            "[%s] PROXY -> CLIENT passthrough error\nstatus=%s content_type=%s",
+            trace_id,
+            sc,
+            media_err,
+        )
     return Response(content=raw, status_code=sc, media_type=media_err)
 
 
@@ -277,12 +392,21 @@ def _verify_dify_token(request: Request, expected_token: str) -> Optional[Respon
 
 async def _scan_text_with_f5(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     settings = get_settings()
+    trace_id = str(uuid.uuid4())[:8]
     if not settings.f5_scans_url:
         return None, None, "F5_SCANS_URL 未配置"
     if not settings.f5_scans_api_key:
         return None, None, "F5_SCANS_API_KEY 未配置"
     assert _client is not None
     try:
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] MODERATION -> GUARDRAIL scans request\nurl=%s\nheaders=%s\nbody=%s",
+                trace_id,
+                settings.f5_scans_url,
+                pretty_payload(mask_auth({"Authorization": f"Bearer {settings.f5_scans_api_key}", "Content-Type": "application/json"})),
+                pretty_payload({"input": text}),
+            )
         resp = await _client.post(
             settings.f5_scans_url,
             headers={
@@ -299,6 +423,13 @@ async def _scan_text_with_f5(text: str) -> tuple[Optional[str], Optional[str], O
             err_text = (await resp.aread()).decode("utf-8", errors="ignore")
         except Exception:
             err_text = ""
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] GUARDRAIL -> MODERATION scans response\nstatus=%s body=%s",
+                trace_id,
+                resp.status_code,
+                err_text[:800],
+            )
         return None, None, f"scans 接口返回非 200：{resp.status_code} {err_text[:200]}"
 
     try:
@@ -308,6 +439,12 @@ async def _scan_text_with_f5(text: str) -> tuple[Optional[str], Optional[str], O
 
     result = data.get("result") if isinstance(data, dict) else None
     outcome = result.get("outcome") if isinstance(result, dict) else None
+    if settings.log_debug:
+        _logger.debug(
+            "[%s] GUARDRAIL -> MODERATION scans response\nstatus=200 body=%s",
+            trace_id,
+            pretty_payload(data),
+        )
     if not isinstance(outcome, str):
         return None, None, "scans 响应缺少 result.outcome"
     redacted_input = data.get("redactedInput") if isinstance(data, dict) else None
@@ -345,8 +482,11 @@ async def chat_completions_last_user_only(request: Request) -> Response:
 @app.post("/moderation")
 async def dify_moderation(request: Request) -> Response:
     settings = get_settings()
+    trace_id = str(uuid.uuid4())[:8]
     auth_error = _verify_dify_token(request, settings.dify_moderation_token)
     if auth_error is not None:
+        if settings.log_debug:
+            _logger.debug("[%s] CLIENT -> MODERATION unauthorized request path=%s", trace_id, request.url.path)
         return auth_error
 
     try:
@@ -365,7 +505,17 @@ async def dify_moderation(request: Request) -> Response:
 
     point = payload.get("point")
     params = payload.get("params")
+    if settings.log_debug:
+        _logger.debug(
+            "[%s] CLIENT -> MODERATION request\npath=%s point=%s\nbody=%s",
+            trace_id,
+            request.url.path,
+            point,
+            pretty_payload(payload),
+        )
     if point == "ping":
+        if settings.log_debug:
+            _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload({"result": "pong"}))
         return JSONResponse({"result": "pong"}, status_code=200)
     if not isinstance(params, dict):
         return JSONResponse(
@@ -398,6 +548,11 @@ async def dify_moderation(request: Request) -> Response:
     # Avoid second-stage overwrite in Dify UI:
     # when output moderation receives the input-block message, bypass output block.
     if point == "app.moderation.output" and content == settings.moderation_input_block_message:
+        if settings.log_debug:
+            _logger.debug(
+                "[%s] MODERATION bypass second-stage overwrite\npoint=app.moderation.output text matched input block message",
+                trace_id,
+            )
         return JSONResponse(
             {"flagged": False, "action": "direct_output", "preset_response": ""},
             status_code=200,
@@ -405,6 +560,8 @@ async def dify_moderation(request: Request) -> Response:
 
     # 空文本按未命中处理，避免对 scans 做无意义调用。
     if not content.strip():
+        if settings.log_debug:
+            _logger.debug("[%s] MODERATION empty content -> pass", trace_id)
         return JSONResponse(
             {"flagged": False, "action": "direct_output", "preset_response": ""},
             status_code=200,
@@ -413,56 +570,73 @@ async def dify_moderation(request: Request) -> Response:
     outcome, redacted_input, err = await _scan_text_with_f5(content)
     if err is not None:
         # 审查服务异常时，保守处理为拦截，防止漏检。
+        resp_payload = {
+            "flagged": True,
+            "action": "direct_output",
+            "preset_response": blocked_message,
+            "error": err,
+        }
+        if settings.log_debug:
+            _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
         return JSONResponse(
             {
-                "flagged": True,
-                "action": "direct_output",
-                "preset_response": blocked_message,
-                "error": err,
+                **resp_payload
             },
             status_code=200,
         )
 
     if outcome == "flagged":
+        resp_payload = {
+            "flagged": True,
+            "action": "direct_output",
+            "preset_response": blocked_message,
+        }
+        if settings.log_debug:
+            _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
         return JSONResponse(
             {
-                "flagged": True,
-                "action": "direct_output",
-                "preset_response": blocked_message,
+                **resp_payload
             },
             status_code=200,
         )
 
     if outcome == "redacted":
         if redacted_input is None:
+            resp_payload = {
+                "flagged": True,
+                "action": "direct_output",
+                "preset_response": blocked_message,
+                "error": "scans outcome=redacted 但缺少 redactedInput",
+            }
+            if settings.log_debug:
+                _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
             return JSONResponse(
                 {
-                    "flagged": True,
-                    "action": "direct_output",
-                    "preset_response": blocked_message,
-                    "error": "scans outcome=redacted 但缺少 redactedInput",
+                    **resp_payload
                 },
                 status_code=200,
             )
         if point == "app.moderation.input":
+            resp_payload = {"flagged": True, "action": "overridden", "query": redacted_input}
+            if settings.log_debug:
+                _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
             return JSONResponse(
                 {
-                    "flagged": True,
-                    "action": "overridden",
-                    "query": redacted_input,
+                    **resp_payload
                 },
                 status_code=200,
             )
+        resp_payload = {"flagged": True, "action": "overridden", "text": redacted_input}
+        if settings.log_debug:
+            _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
         return JSONResponse(
             {
-                "flagged": True,
-                "action": "overridden",
-                "text": redacted_input,
+                **resp_payload
             },
             status_code=200,
         )
 
-    return JSONResponse(
-        {"flagged": False, "action": "direct_output", "preset_response": ""},
-        status_code=200,
-    )
+    resp_payload = {"flagged": False, "action": "direct_output", "preset_response": ""}
+    if settings.log_debug:
+        _logger.debug("[%s] MODERATION -> CLIENT response\nstatus=200 body=%s", trace_id, pretty_payload(resp_payload))
+    return JSONResponse(resp_payload, status_code=200)

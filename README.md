@@ -33,6 +33,8 @@
 | `DIFY_MODERATION_TOKEN` | Dify 调用审查接口时的 Bearer Token（必填） | 空（未配置将导致 moderation 接口返回 500） |
 | `MODERATION_INPUT_BLOCK_MESSAGE` | input 扩展点命中违规时的 `preset_response` | `请求经F5 Guardrail检查存在违规。` |
 | `MODERATION_OUTPUT_BLOCK_MESSAGE` | output 扩展点命中违规时的 `preset_response` | `响应经F5 Guardrail检查存在违规。` |
+| `LOG_DEBUG` | 调试日志开关，`true/1/on/yes` 开启详细链路日志 | 关闭 |
+| `LOG_FILE_NAME` | 日志文件名（写入程序启动目录） | `f5api-converter.log` |
 
 ## 安装与运行
 
@@ -135,6 +137,17 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 - 为避免漏检，若 scans 接口异常（超时、非 200、返回格式错误、缺少 `result.outcome`），当前实现采用**保守拦截**策略：同样返回 `flagged=true` + `direct_output`，并在响应里附带 `error` 字段便于排障。
 - 为避免 Dify 在 input/output 连续审查时出现文案二次覆盖：当 `app.moderation.output` 收到的 `params.text` 恰好等于 `MODERATION_INPUT_BLOCK_MESSAGE`，服务会直接放行（`flagged=false`），不再改写成 output 文案。
 - 若 scans 返回 `outcome=redacted` 但缺少 `redactedInput`，当前实现回退为保守拦截（`direct_output` + `error`）。
+
+### 调试日志
+
+- 开启方式：设置 `LOG_DEBUG=true`。
+- 日志位置：程序运行目录下 `LOG_FILE_NAME` 指定文件（默认 `f5api-converter.log`）。
+- 日志覆盖范围：
+  - Client -> Proxy 请求与 Proxy -> Client 响应
+  - Proxy <-> Guardrail（chat/completions）请求与响应
+  - Moderation <-> Guardrail（scans）请求与响应
+  - Moderation 接口自身的输入/输出
+- 可观测性：每条链路附带短 `trace_id`，同一请求可串联查看完整流程；`Authorization` 自动脱敏。
 
 ### 流式成功路径说明
 

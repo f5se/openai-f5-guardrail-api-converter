@@ -41,6 +41,8 @@ class Settings:
     dify_moderation_token: str
     moderation_input_block_message: str
     moderation_output_block_message: str
+    log_debug: bool
+    log_file_name: str
 
 
 @lru_cache
@@ -68,4 +70,6 @@ def get_settings() -> Settings:
             "MODERATION_OUTPUT_BLOCK_MESSAGE",
             "响应经F5 Guardrail检查存在违规。",
         ),
+        log_debug=os.environ.get("LOG_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"),
+        log_file_name=os.environ.get("LOG_FILE_NAME", "f5api-converter.log").strip() or "f5api-converter.log",
     )
