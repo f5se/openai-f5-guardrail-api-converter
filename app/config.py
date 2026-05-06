@@ -1,0 +1,55 @@
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.environ.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.environ.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class Settings:
+    upstream_base_url: str
+    host: str
+    port: int
+    http_timeout_connect: float
+    http_timeout_read: float
+    http_timeout_write: float
+    http_timeout_pool: float
+    max_connections: int
+    max_keepalive_connections: int
+    models_list_id: str
+    models_list_owned_by: str
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings(
+        upstream_base_url=os.environ.get("UPSTREAM_BASE_URL", "").strip(),
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=_env_int("PORT", 8080),
+        http_timeout_connect=_env_float("HTTP_TIMEOUT_CONNECT", 30.0),
+        http_timeout_read=_env_float("HTTP_TIMEOUT_READ", 600.0),
+        http_timeout_write=_env_float("HTTP_TIMEOUT_WRITE", 60.0),
+        http_timeout_pool=_env_float("HTTP_TIMEOUT_POOL", 5.0),
+        max_connections=_env_int("MAX_CONNECTIONS", 200),
+        max_keepalive_connections=_env_int("MAX_KEEPALIVE_CONNECTIONS", 50),
+        models_list_id=os.environ.get("MODELS_LIST_ID", "placeholder-model"),
+        models_list_owned_by=os.environ.get("MODELS_LIST_OWNED_BY", "proxy"),
+    )
