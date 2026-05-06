@@ -393,6 +393,14 @@ async def dify_moderation(request: Request) -> Response:
     if not isinstance(content, str):
         content = str(content)
 
+    # Avoid second-stage overwrite in Dify UI:
+    # when output moderation receives the input-block message, bypass output block.
+    if point == "app.moderation.output" and content == settings.moderation_input_block_message:
+        return JSONResponse(
+            {"flagged": False, "action": "direct_output", "preset_response": ""},
+            status_code=200,
+        )
+
     # 空文本按未命中处理，避免对 scans 做无意义调用。
     if not content.strip():
         return JSONResponse(

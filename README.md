@@ -131,6 +131,7 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 
 说明：
 - 为避免漏检，若 scans 接口异常（超时、非 200、返回格式错误、缺少 `result.outcome`），当前实现采用**保守拦截**策略：同样返回 `flagged=true` + `direct_output`，并在响应里附带 `error` 字段便于排障。
+- 为避免 Dify 在 input/output 连续审查时出现文案二次覆盖：当 `app.moderation.output` 收到的 `params.text` 恰好等于 `MODERATION_INPUT_BLOCK_MESSAGE`，服务会直接放行（`flagged=false`），不再改写成 output 文案。
 
 ### 流式成功路径说明
 
