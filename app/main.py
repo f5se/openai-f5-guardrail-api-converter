@@ -393,7 +393,10 @@ async def dify_moderation(request: Request) -> Response:
 
     # 空文本按未命中处理，避免对 scans 做无意义调用。
     if not content.strip():
-        return JSONResponse({"flagged": False}, status_code=200)
+        return JSONResponse(
+            {"flagged": False, "action": "direct_output", "preset_response": ""},
+            status_code=200,
+        )
 
     flagged, err = await _scan_text_with_f5(content)
     if err is not None:
@@ -418,4 +421,7 @@ async def dify_moderation(request: Request) -> Response:
             status_code=200,
         )
 
-    return JSONResponse({"flagged": False}, status_code=200)
+    return JSONResponse(
+        {"flagged": False, "action": "direct_output", "preset_response": ""},
+        status_code=200,
+    )
