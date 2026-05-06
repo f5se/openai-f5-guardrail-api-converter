@@ -31,7 +31,8 @@
 | `F5_SCANS_URL` | F5 scans 完整 URL（例如 `https://calypsoai.app/backend/v1/scans`） | 空 |
 | `F5_SCANS_API_KEY` | F5 scans 的 Bearer Token | 空 |
 | `DIFY_MODERATION_TOKEN` | Dify 调用审查接口时的 Bearer Token（必填） | 空（未配置将导致 moderation 接口返回 500） |
-| `MODERATION_BLOCK_MESSAGE` | 命中或故障时 direct_output 预设回答 | `请求或响应经F5 Guardrail检查存在违规。` |
+| `MODERATION_INPUT_BLOCK_MESSAGE` | input 扩展点命中违规时的 `preset_response` | `请求经F5 Guardrail检查存在违规。` |
+| `MODERATION_OUTPUT_BLOCK_MESSAGE` | output 扩展点命中违规时的 `preset_response` | `响应经F5 Guardrail检查存在违规。` |
 
 ## 安装与运行
 
@@ -103,13 +104,18 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 - 送审请求：`POST $F5_SCANS_URL`，`Authorization: Bearer $F5_SCANS_API_KEY`，JSON 体为 `{"input":"<待审文本>"}`。
 - 判定规则：当 scans 返回 JSON 中 `result.outcome == "flagged"` 时视为违规。
 
-命中违规时统一返回：
+命中违规时返回（按扩展点区分，且可由环境变量配置）：
+
+- `app.moderation.input`：`preset_response = $MODERATION_INPUT_BLOCK_MESSAGE`
+- `app.moderation.output`：`preset_response = $MODERATION_OUTPUT_BLOCK_MESSAGE`
+
+示例：
 
 ```json
 {
   "flagged": true,
   "action": "direct_output",
-  "preset_response": "请求或响应经F5 Guardrail检查存在违规。"
+  "preset_response": "请求经F5 Guardrail检查存在违规。"
 }
 ```
 
@@ -117,7 +123,9 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 
 ```json
 {
-  "flagged": false
+  "flagged": false,
+  "action": "direct_output",
+  "preset_response": ""
 }
 ```
 

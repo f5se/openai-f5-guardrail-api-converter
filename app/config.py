@@ -39,7 +39,8 @@ class Settings:
     f5_scans_url: str
     f5_scans_api_key: str
     dify_moderation_token: str
-    moderation_block_message: str
+    moderation_input_block_message: str
+    moderation_output_block_message: str
 
 
 @lru_cache
@@ -59,8 +60,12 @@ def get_settings() -> Settings:
         f5_scans_url=os.environ.get("F5_SCANS_URL", "").strip(),
         f5_scans_api_key=os.environ.get("F5_SCANS_API_KEY", "").strip(),
         dify_moderation_token=os.environ.get("DIFY_MODERATION_TOKEN", "").strip(),
-        moderation_block_message=os.environ.get(
-            "MODERATION_BLOCK_MESSAGE",
-            "请求或响应经F5 Guardrail检查存在违规。",
+        moderation_input_block_message=os.environ.get(
+            "MODERATION_INPUT_BLOCK_MESSAGE",
+            "请求经F5 Guardrail检查存在违规。",
+        ),
+        moderation_output_block_message=os.environ.get(
+            "MODERATION_OUTPUT_BLOCK_MESSAGE",
+            "响应经F5 Guardrail检查存在违规。",
         ),
     )

@@ -373,8 +373,10 @@ async def dify_moderation(request: Request) -> Response:
 
     if point == "app.moderation.input":
         content = params.get("query")
+        blocked_message = settings.moderation_input_block_message
     elif point == "app.moderation.output":
         content = params.get("text")
+        blocked_message = settings.moderation_output_block_message
     else:
         return JSONResponse(
             {
@@ -405,7 +407,7 @@ async def dify_moderation(request: Request) -> Response:
             {
                 "flagged": True,
                 "action": "direct_output",
-                "preset_response": settings.moderation_block_message,
+                "preset_response": blocked_message,
                 "error": err,
             },
             status_code=200,
@@ -416,7 +418,7 @@ async def dify_moderation(request: Request) -> Response:
             {
                 "flagged": True,
                 "action": "direct_output",
-                "preset_response": settings.moderation_block_message,
+                "preset_response": blocked_message,
             },
             status_code=200,
         )
