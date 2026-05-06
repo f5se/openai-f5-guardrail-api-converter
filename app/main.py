@@ -116,7 +116,38 @@ def _looks_like_sse_payload(raw: bytes) -> bool:
     return sample.startswith(b"data:") or sample.startswith(b"event:") or sample.startswith(b"id:")
 
 
-async def _proxy_chat_completions(request: Request) -> Response:
+def _build_last_user_only_body(original_body: bytes) -> tuple[Optional[bytes], Optional[str]]:
+    """
+    Keep only the latest role=user message in `messages`, preserve all other fields.
+    Returns (new_body, error_message). When error_message is not None, new_body is None.
+    """
+    try:
+        payload = json.loads(original_body.decode("utf-8"))
+    except Exception as e:
+        return None, f"请求体不是合法 JSON：{e}"
+
+    if not isinstance(payload, dict):
+        return None, "请求体必须是 JSON 对象"
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None, "请求体缺少 messages 数组"
+
+    latest_user_msg = None
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            latest_user_msg = msg
+            break
+
+    if latest_user_msg is None:
+        return None, "messages 中未找到 role=user 的消息"
+
+    new_payload = dict(payload)
+    new_payload["messages"] = [latest_user_msg]
+    return json.dumps(new_payload, ensure_ascii=False).encode("utf-8"), None
+
+
+async def _proxy_chat_completions(request: Request, body_override: Optional[bytes] = None) -> Response:
     settings = get_settings()
     if not settings.upstream_base_url:
         return JSONResponse(
@@ -129,7 +160,7 @@ async def _proxy_chat_completions(request: Request) -> Response:
             status_code=500,
         )
 
-    body = await request.body()
+    body = body_override if body_override is not None else await request.body()
     stream_requested, model_name = parse_client_body(body)
     headers = _upstream_headers(request)
 
@@ -236,3 +267,23 @@ async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
 @app.post("/chat/completions")
 async def chat_completions(request: Request) -> Response:
     return await _proxy_chat_completions(request)
+
+
+@app.post("/last/v1/chat/completions")
+@app.post("/last/chat/completions")
+async def chat_completions_last_user_only(request: Request) -> Response:
+    original_body = await request.body()
+    rewritten_body, error = _build_last_user_only_body(original_body)
+    if error is not None:
+        return JSONResponse(
+            {
+                "error": {
+                    "message": f"/last 路由请求转换失败：{error}",
+                    "type": "invalid_request_error",
+                }
+            },
+            status_code=400,
+        )
+
+    assert rewritten_body is not None
+    return await _proxy_chat_completions(request, body_override=rewritten_body)

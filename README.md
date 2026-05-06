@@ -5,6 +5,7 @@
 ## 功能概要
 
 - **接收**：`POST /v1/chat/completions`（另支持 `POST /chat/completions`），请求体与 OpenAI Chat Completions 一致。
+- **接收（last 模式）**：`POST /last/v1/chat/completions`（另支持 `POST /last/chat/completions`），会将请求体中的 `messages` 裁剪为仅保留最新一条 `role=user` 消息后再转发上游，其它字段保持不变。
 - **转发**：将收到的请求体与 `Authorization`、`Content-Type` 等必要头转发至配置的完整上游 URL（含路径）。
 - **成功**：上游 HTTP 200 时，响应体原样返回；客户端请求 `stream: true` 且上游为 SSE（`text/event-stream`）时边读边吐。
 - **阻断**：上游 HTTP 400 且为 Guardrail 阻断 JSON 时，解析 `error.cai_error.scanner_results` 中 `outcome == "failed"` 的项，拼装中文说明文案，并以 OpenAI `chat.completion` / `chat.completion.chunk`（流式）返回，**HTTP 状态码为 200**，`finish_reason` 为 **`stop`**。
@@ -52,6 +53,24 @@ curl -sS "$PROXY_BASE/v1/chat/completions" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"你好"}],"stream":false}'
 ```
 
+仅转发会话最新用户消息（last 模式）：
+
+```bash
+curl -sS "$PROXY_BASE/last/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{
+    "model":"deepseek-v4-flash",
+    "messages":[
+      {"role":"system","content":"你是助手"},
+      {"role":"user","content":"第一问"},
+      {"role":"assistant","content":"第一答"},
+      {"role":"user","content":"第二问（仅这一条会被转发到上游）"}
+    ],
+    "stream": true
+  }'
+```
+
 ## 行为说明
 
 ### 阻断文案拼装规则
@@ -62,6 +81,12 @@ curl -sS "$PROXY_BASE/v1/chat/completions" \
 2. 若 `message` 非空，再输出一行该 `message`；若为空则不输出 message 行。
 
 文首固定为：`请求已被F5 Guardrail由以下策略阻断：`
+
+### /last 路由的输入约束
+
+- 请求体必须是 JSON 对象，且包含 `messages` 数组。
+- `messages` 中必须至少有一条 `role=user` 消息。
+- 不满足上述条件时，返回 HTTP 400（`invalid_request_error`）。
 
 ### 流式成功路径说明
 
