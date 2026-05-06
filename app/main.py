@@ -275,12 +275,12 @@ def _verify_dify_token(request: Request, expected_token: str) -> Optional[Respon
     return None
 
 
-async def _scan_text_with_f5(text: str) -> tuple[Optional[bool], Optional[str]]:
+async def _scan_text_with_f5(text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     settings = get_settings()
     if not settings.f5_scans_url:
-        return None, "F5_SCANS_URL 未配置"
+        return None, None, "F5_SCANS_URL 未配置"
     if not settings.f5_scans_api_key:
-        return None, "F5_SCANS_API_KEY 未配置"
+        return None, None, "F5_SCANS_API_KEY 未配置"
     assert _client is not None
     try:
         resp = await _client.post(
@@ -292,25 +292,27 @@ async def _scan_text_with_f5(text: str) -> tuple[Optional[bool], Optional[str]]:
             json={"input": text},
         )
     except Exception as e:
-        return None, f"调用 scans 接口失败：{e}"
+        return None, None, f"调用 scans 接口失败：{e}"
 
     if resp.status_code != 200:
         try:
             err_text = (await resp.aread()).decode("utf-8", errors="ignore")
         except Exception:
             err_text = ""
-        return None, f"scans 接口返回非 200：{resp.status_code} {err_text[:200]}"
+        return None, None, f"scans 接口返回非 200：{resp.status_code} {err_text[:200]}"
 
     try:
         data = resp.json()
     except Exception as e:
-        return None, f"scans 响应 JSON 解析失败：{e}"
+        return None, None, f"scans 响应 JSON 解析失败：{e}"
 
     result = data.get("result") if isinstance(data, dict) else None
     outcome = result.get("outcome") if isinstance(result, dict) else None
     if not isinstance(outcome, str):
-        return None, "scans 响应缺少 result.outcome"
-    return outcome.lower() == "flagged", None
+        return None, None, "scans 响应缺少 result.outcome"
+    redacted_input = data.get("redactedInput") if isinstance(data, dict) else None
+    redacted_value = redacted_input if isinstance(redacted_input, str) else None
+    return outcome.lower(), redacted_value, None
 
 
 @app.post("/v1/chat/completions")
@@ -408,7 +410,7 @@ async def dify_moderation(request: Request) -> Response:
             status_code=200,
         )
 
-    flagged, err = await _scan_text_with_f5(content)
+    outcome, redacted_input, err = await _scan_text_with_f5(content)
     if err is not None:
         # 审查服务异常时，保守处理为拦截，防止漏检。
         return JSONResponse(
@@ -421,12 +423,41 @@ async def dify_moderation(request: Request) -> Response:
             status_code=200,
         )
 
-    if flagged:
+    if outcome == "flagged":
         return JSONResponse(
             {
                 "flagged": True,
                 "action": "direct_output",
                 "preset_response": blocked_message,
+            },
+            status_code=200,
+        )
+
+    if outcome == "redacted":
+        if redacted_input is None:
+            return JSONResponse(
+                {
+                    "flagged": True,
+                    "action": "direct_output",
+                    "preset_response": blocked_message,
+                    "error": "scans outcome=redacted 但缺少 redactedInput",
+                },
+                status_code=200,
+            )
+        if point == "app.moderation.input":
+            return JSONResponse(
+                {
+                    "flagged": True,
+                    "action": "overridden",
+                    "query": redacted_input,
+                },
+                status_code=200,
+            )
+        return JSONResponse(
+            {
+                "flagged": True,
+                "action": "overridden",
+                "text": redacted_input,
             },
             status_code=200,
         )

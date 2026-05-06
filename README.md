@@ -102,7 +102,9 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
   - `app.moderation.input`：读取 `params.query` 送审
   - `app.moderation.output`：读取 `params.text` 送审
 - 送审请求：`POST $F5_SCANS_URL`，`Authorization: Bearer $F5_SCANS_API_KEY`，JSON 体为 `{"input":"<待审文本>"}`。
-- 判定规则：当 scans 返回 JSON 中 `result.outcome == "flagged"` 时视为违规。
+- 判定规则：
+  - `result.outcome == "flagged"`：违规，返回 `action=direct_output`
+  - `result.outcome == "redacted"`：返回 `action=overridden`，并将 scans 返回的 `redactedInput` 写入对应字段（input 写入 `query`，output 写入 `text`）
 
 命中违规时返回（按扩展点区分，且可由环境变量配置）：
 
@@ -132,6 +134,7 @@ curl -sS "$PROXY_BASE/last/v1/chat/completions" \
 说明：
 - 为避免漏检，若 scans 接口异常（超时、非 200、返回格式错误、缺少 `result.outcome`），当前实现采用**保守拦截**策略：同样返回 `flagged=true` + `direct_output`，并在响应里附带 `error` 字段便于排障。
 - 为避免 Dify 在 input/output 连续审查时出现文案二次覆盖：当 `app.moderation.output` 收到的 `params.text` 恰好等于 `MODERATION_INPUT_BLOCK_MESSAGE`，服务会直接放行（`flagged=false`），不再改写成 output 文案。
+- 若 scans 返回 `outcome=redacted` 但缺少 `redactedInput`，当前实现回退为保守拦截（`direct_output` + `error`）。
 
 ### 流式成功路径说明
 
