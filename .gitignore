@@ -3,5 +3,5 @@ __pycache__/
 *.py[cod]
 .Python
 .env
-*.txt
+f5-guardrail-response.txt
 中间服务开发要求.md
