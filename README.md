@@ -2,6 +2,8 @@
 
 在客户端与 F5 Guardrail（OpenAI 兼容上游）之间转发 `chat/completions` 请求。上游正常返回时原样透传；上游以 HTTP 400 返回 Guardrail 阻断详情时，转换为 **HTTP 200** 下的 OpenAI 兼容响应（含非流式 JSON 或 SSE 流），便于仅支持 OpenAI 形态的客户端消费。
 
+为Dify的审查接口（Moderation API）提供支持，支持请求与响应的内容审查。
+
 ## 功能概要
 
 - **接收**：`POST /v1/chat/completions`（另支持 `POST /chat/completions`），请求体与 OpenAI Chat Completions 一致。
